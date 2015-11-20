@@ -200,6 +200,8 @@ newSource w prim ins o = (\ b -> Source b prim ins o) <$> newBus w
 --------------------------------------------------------------------}
 
 -- | Typed aggregate of buses. @'Buses' a@ carries a value of type @a@.
+-- @IsoB@ is the isomorphic form. Note: b must not have one of the standard forms.
+-- If it does, we'll get a run-time error when consuming.
 data Buses :: * -> * where
   UnitB   :: Buses Unit
   BoolB   :: Source -> Buses Bool
@@ -207,8 +209,6 @@ data Buses :: * -> * where
   DoubleB :: Source -> Buses Double
   PairB   :: Buses a -> Buses b -> Buses (a :* b)
   FunB    :: (a :> b) -> Buses (a -> b)
-  -- | Isomorphic form. Note: b must not have one of the standard forms.
-  -- If it does, we'll get a run-time error when consuming.
   IsoB    :: Buses (Rep a) -> Buses a
 
 instance Eq (Buses a) where

@@ -52,6 +52,7 @@ Library
                     Circat.Netlist
                     Circat.ShowUtils
                     Circat.Prim
+                    Circat.FFT
   Other-Modules:
                     Circat.Examples
 
