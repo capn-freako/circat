@@ -7,6 +7,7 @@ TAGS
 tags
 tarballs
 out/
+.stack*
 
 # Mac OS generates
 .DS_Store
@@ -14,3 +15,5 @@ out/
 # Where do these files come from?  They're not readable.
 # For instance, .#Help.page
 .#*
+src/Circat/Deriv.hs
+Unused/
