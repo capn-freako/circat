@@ -29,8 +29,11 @@ import Data.Monoid
 import Control.Applicative (WrappedMonad(..))
 import qualified GHC.Generics as G
 
-import Control.Monad.Trans.State (StateT(..))
 import Data.Functor.Identity (Identity(..))
+import Control.Monad.Trans.Reader (ReaderT(..))
+import Control.Monad.Trans.Writer (WriterT(..))
+import Control.Monad.Trans.State (StateT(..))
+
 -- import Data.Void (Void)
 -- TODO: more
 
@@ -74,6 +77,30 @@ instance HasRep (a,b,c,d) where
   type Rep (a,b,c,d) = ((a,b),(c,d))
   repr (a,b,c,d) = ((a,b),(c,d))
   abst ((a,b),(c,d)) = (a,b,c,d)
+  INLINES
+
+instance HasRep (a,b,c,d,e) where
+  type Rep (a,b,c,d,e) = ((a,b,c,d),e)
+  repr (a,b,c,d,e) = ((a,b,c,d),e)
+  abst ((a,b,c,d),e) = (a,b,c,d,e)
+  INLINES
+
+instance HasRep (a,b,c,d,e,f) where
+  type Rep (a,b,c,d,e,f) = ((a,b,c,d),(e,f))
+  repr (a,b,c,d,e,f) = ((a,b,c,d),(e,f))
+  abst ((a,b,c,d),(e,f)) = (a,b,c,d,e,f)
+  INLINES
+
+instance HasRep (a,b,c,d,e,f,g) where
+  type Rep (a,b,c,d,e,f,g) = ((a,b,c,d),(e,f,g))
+  repr (a,b,c,d,e,f,g) = ((a,b,c,d),(e,f,g))
+  abst ((a,b,c,d),(e,f,g)) = (a,b,c,d,e,f,g)
+  INLINES
+
+instance HasRep (a,b,c,d,e,f,g,h) where
+  type Rep (a,b,c,d,e,f,g,h) = ((a,b,c,d),(e,f,g,h))
+  repr (a,b,c,d,e,f,g,h) = ((a,b,c,d),(e,f,g,h))
+  abst ((a,b,c,d),(e,f,g,h)) = (a,b,c,d,e,f,g,h)
   INLINES
 
 #if 0
@@ -122,6 +149,8 @@ WrapRep(Dual a,a,Dual)
 WrapRep(Endo a,a->a,Endo)
 WrapRep(WrappedMonad m a,m a,WrapMonad)
 WrapRep(Identity a,a,Identity)
+WrapRep(ReaderT e m a, e -> m a, ReaderT)
+WrapRep(WriterT w m a, m (a,w), WriterT)
 WrapRep(StateT s m a, s -> m (a,s), StateT)
 
 WrapRep(Parity,Bool,Parity)
@@ -137,6 +166,7 @@ instance HasRep (Maybe a) where
   repr Nothing  = (False,undefined)
   abst (True,a ) = Just a
   abst (False,_) = Nothing 
+  INLINES
 
 -- TODO: LambdaCCC.Prim has an BottomP primitive. If the error ever occurs,
 -- replace with ErrorP (taking a string argument) and tweak the reification.

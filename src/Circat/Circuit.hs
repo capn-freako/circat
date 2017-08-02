@@ -2,8 +2,14 @@
 
 -- #define NoOptimizeCircuit
 -- #define NoHashCons
+
 -- #define NoIfBotOpt
 -- #define NoIdempotence
+
+-- -- Improves hash consing, but can obscure equivalent circuits
+-- #define NoCommute
+
+#define NoBusSize
 
 #define MealyToArrow
 
@@ -27,12 +33,14 @@
 {-# LANGUAGE ExistentialQuantification, TypeSynonymInstances, GADTs #-}
 {-# LANGUAGE Rank2Types, ScopedTypeVariables #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
--- {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds #-} -- for LU & BU
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RecursiveDo #-}
 {-# LANGUAGE DeriveFunctor, DeriveDataTypeable #-}
+{-# LANGUAGE TypeApplications, AllowAmbiguousTypes #-}
+
+-- TODO: trim language extensions
 
 #ifdef ChurchSums
 {-# LANGUAGE LiberalTypeSynonyms, ImpredicativeTypes, EmptyDataDecls #-}
@@ -41,6 +49,21 @@
 {-# OPTIONS_GHC -Wall #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-} -- for OkayArr
 {-# OPTIONS_GHC -fno-warn-unticked-promoted-constructors #-}
+
+-- This module compiles pretty slowly. Some of my pattern matching style led to
+-- the following warning:
+-- 
+--        Pattern match checker exceeded (2000000) iterations in
+--        a case alternative. (Use -fmax-pmcheck-iterations=n
+--        to set the maximun number of iterations to n)
+-- 
+-- I've simplified my style by replacing uses of the Eql macro by explicit
+-- equality checks. To find at least some problematic definitions, lower
+-- -fmax-pmcheck-iterations from default of 2000000. I'd like to simplify
+-- further. Ideally, use constructor pattern matching in the rewrites, instead
+-- of comparing string.
+
+{-# OPTIONS_GHC -fmax-pmcheck-iterations=1000000 #-}
 
 -- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
 -- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
@@ -60,7 +83,7 @@
 module Circat.Circuit
   ( CircuitM, (:>)
   , PinId, Width, Bus(..), Source(..)
-  , GenBuses(..), GS, genBusesRep', delayCRep, tyRep, bottomRep, unDelayName
+  , GenBuses(..), GS, GST, genBusesRep', delayCRep, tyRep, bottomRep, unDelayName
   , namedC, constS, constC
   , SourceToBuses(..)
 --   , litUnit, litBool, litInt
@@ -120,7 +143,12 @@ import System.Exit (ExitCode(ExitSuccess))
 
 -- mtl
 import Control.Monad.State (State,execState,StateT)
-import qualified Control.Monad.State as Mtl
+
+-- For AbsTy
+import qualified Data.Functor.Identity as M
+import qualified Control.Monad.Trans.Reader as M
+import qualified Control.Monad.Trans.Writer as M
+import qualified Control.Monad.State as M
 
 -- import TypeUnary.Vec hiding (get)
 
@@ -187,7 +215,7 @@ instance Show Source where
   show (Source b prim ins o) = printf "Source %s %s %s %d" (show b) (show prim) (show ins) o
 
 newPinId :: CircuitM PinId
-newPinId = do { (p:ps',comps) <- Mtl.get ; Mtl.put (ps',comps) ; return p }
+newPinId = do { (p:ps',comps) <- M.get ; M.put (ps',comps) ; return p }
 
 newBus :: Width -> CircuitM Bus
 newBus w = -- trace "newBus" $
@@ -248,7 +276,7 @@ instance Show (Buses a) where
 data Ty = UnitT | BoolT | IntT | FloatT | DoubleT | PairT Ty Ty deriving (Eq,Ord,Show)
 
 genBuses :: GenBuses b => Prim a b -> Sources -> CircuitM (Buses b)
-genBuses prim ins = Mtl.evalStateT (genBuses' (primName prim) ins) 0
+genBuses prim ins = M.evalStateT (genBuses' (primName prim) ins) 0
 
 type BusesM = StateT Int CircuitM
 
@@ -261,9 +289,9 @@ type GS a = (GenBuses a, Show a)
 
 genBus :: (Source -> Buses a) -> Width
        -> String -> Sources -> BusesM (Buses a)
-genBus wrap w prim ins = do o <- Mtl.get
-                            src <- Mtl.lift (newSource w prim ins o)
-                            Mtl.put (o+1)
+genBus wrap w prim ins = do o <- M.get
+                            src <- M.lift (newSource w prim ins o)
+                            M.put (o+1)
                             return (wrap src)
 
 instance GenBuses Unit where
@@ -296,7 +324,7 @@ instance GenBuses Int  where
   ty = const IntT
 
 instance GenBuses Float  where
-  genBuses' = genBus FloatB 64
+  genBuses' = genBus FloatB 32
   delay = primDelay
   ty = const FloatT
 
@@ -426,15 +454,15 @@ genComp :: forall a b. GenBuses b => Prim a b -> BCirc a b
 #if !defined NoHashCons
 genComp prim a =
   do 
-     mb <- Mtl.gets (M.lookup key . snd)
+     mb <- M.gets (M.lookup key . snd)
      case mb of
        Just (Comp _ _ b', _) ->
-         do Mtl.modify (second (M.adjust (second succ) key))
+         do M.modify (second (M.adjust (second succ) key))
             return (unsafeCoerce b')
        Nothing               ->
          do b <- genBuses prim ins
             let comp = Comp prim a b
-            Mtl.modify (second (M.insert key (comp,0)))
+            M.modify (second (M.insert key (comp,0)))
             return b
  where
    ins  = flattenBHack "genComp" prim a
@@ -450,7 +478,7 @@ genComp prim a = -- trace (printf "genComp %s %s --> %s"
                  --         (show prim) (show a) (show (ty (undefined :: b)))) $
                  do b <- genBuses prim (flattenBHack "genComp" prim a)
                     -- trace (printf "gen'd buses %s" (show b)) (return ())
-                    Mtl.modify (second (Comp prim a b :))
+                    M.modify (second (Comp prim a b :))
                     -- trace (printf "added comp %s" (show (Comp prim a b))) (return ())
                     return b
 #endif
@@ -492,11 +520,29 @@ constComp str = const (constComp' str)
 -- == (), defined as flip genComp UnitB. Add domain flexibility in lambda-ccc
 -- instead.
 
-constM :: GS b => b -> BCirc a b
+type GST a = (GS a, Tweakable a)
+
+constM :: GST b => b -> BCirc a b
 constM b = constComp (constName b)
 
-constName :: Show b => b -> String
-constName = show
+class Tweakable a where
+  tweakVal :: a -> a
+  tweakVal = id
+
+instance Tweakable ()
+instance Tweakable Bool
+instance Tweakable Int
+instance Tweakable Float  where tweakVal = pullZero 1e-7
+instance Tweakable Double where tweakVal = pullZero 1e-14
+-- TODO: tune the deltas
+
+-- Hack to help eliminate numeric errors involved
+pullZero :: (Ord a, Num a) => a -> a -> a
+pullZero delta a | abs a < delta = 0
+                 | otherwise     = a
+
+constName :: (Tweakable b, Show b) => b -> String
+constName = show . tweakVal
 
 {--------------------------------------------------------------------
     Circuit category
@@ -562,10 +608,10 @@ newComp3R :: (SourceToBuses a, SourceToBuses b, SourceToBuses c) =>
              (a :* (b :* c) :> d) -> Source -> Source -> Source -> CircuitM (Maybe (Buses d))
 newComp3R cir a b c = newComp cir (PairB (toBuses a) (PairB (toBuses b) (toBuses c)))
 
-newVal :: GS b => b -> CircuitM (Maybe (Buses b))
+newVal :: GST b => b -> CircuitM (Maybe (Buses b))
 newVal b = Just <$> constM' b
 
-constM' :: GS b => b -> CircuitM (Buses b)
+constM' :: GST b => b -> CircuitM (Buses b)
 constM' b = constComp' (constName b)
 
 -- noOpt :: Opt b
@@ -591,8 +637,11 @@ primOpt name opt =
 tryCommute :: a :> a
 tryCommute = mkCK try
  where
+#if !defined NoCommute
    try (PairB (BoolB a) (BoolB a')) | a > a' = return (PairB (BoolB a') (BoolB a))
    try (PairB (IntB  a) (IntB  a')) | a > a' = return (PairB (IntB  a') (IntB  a))
+   -- TODO: Float & Double
+#endif
    try b = return b
 
 -- Like primOpt, but sorts. Use for commutative operations to improve reuse
@@ -603,7 +652,7 @@ primOpt name _ = namedC name
 primOptSort = primOpt
 #endif
 
-primNoOpt1 :: (GenBuses b, Show b, Read a) => String -> (a -> b) -> a :> b
+primNoOpt1 :: (GST b, Read a) => String -> (a -> b) -> a :> b
 primNoOpt1 name fun = 
   primOpt name $
     \ case [Val x] -> newVal (fun x)
@@ -617,7 +666,7 @@ constSM mkB = mkCK (const mkB)
 constS :: Buses b -> (a :> b)
 constS b = constSM (return b)
 
-constC :: GS b => b -> a :> b
+constC :: GST b => b -> a :> b
 constC = mkCK . constM
 
 -- Phasing out constC
@@ -756,7 +805,6 @@ constM' :: GS b => b -> CircuitM (Buses b)
 
 #define UNDEFINED "⊥"
 
--- bottomScalar :: GenBuses b => CircuitM (Buses b)
 bottomScalar :: GenBuses b => Unit :> b
 bottomScalar = mkCK (constComp UNDEFINED)
 
@@ -765,6 +813,7 @@ bottomScalar = mkCK (constComp UNDEFINED)
 
 BottomPrim(Bool)
 BottomPrim(Int)
+BottomPrim(Float)
 BottomPrim(Double)
 
 instance BottomCat (:>) Unit where
@@ -820,7 +869,16 @@ pattern NotS a <- Source _ "¬" [a] 0
 pattern XorS :: Source -> Source -> Source
 pattern XorS a b <- Source _ "⊕" [a,b] 0
 
+pattern EqS :: Source -> Source -> Source
+pattern EqS a b <- Source _ "≡" [a,b] 0
+
+pattern NeS :: Source -> Source -> Source
+pattern NeS a b <- Source _ "≠" [a,b] 0
+
+-- TODO: state names like "⊕" and "≡" just once.
+
 class SourceToBuses a where toBuses :: Source -> Buses a
+instance SourceToBuses ()     where toBuses = const UnitB
 instance SourceToBuses Bool   where toBuses = BoolB
 instance SourceToBuses Int    where toBuses = IntB
 instance SourceToBuses Float  where toBuses = FloatB
@@ -828,6 +886,12 @@ instance SourceToBuses Double where toBuses = DoubleB
 
 sourceB :: SourceToBuses a => Source -> CircuitM (Maybe (Buses a))
 sourceB = justA . toBuses
+
+unknownName :: PrimName
+unknownName = "??"
+
+instance GenBuses b => UnknownCat (:>) a b where
+  unknownC = namedC unknownName
 
 #define Sat(pred) ((pred) -> True)
 #define Eql(x) Sat(==(x))
@@ -844,54 +908,67 @@ primDelay a0 = primOpt (delayName a0s) $ \ case
 
 instance BoolCat (:>) where
   notC = primOpt "¬" $ \ case
-           [NotS a]     -> sourceB a
-           [Val x]      -> newVal (not x)
-           _            -> nothingA
+           [NotS a]  -> sourceB a
+           [Val x]   -> newVal (not x)
+           _         -> nothingA
+  -- TODO: I want to add more like the following:
+  -- 
+  --      [EqS a b] -> newComp2 notEqual a b
+  --      
+  -- But
+  -- 
+  --   Ambiguous type variable ‘b0’ arising from a use of ‘newComp2’
+  --   prevents the constraint ‘(SourceToBuses b0)’ from being solved.
+  -- 
+  -- Optimizations are limited by not having static access to source types. I
+  -- think I can fix it by adding a `Ty` (statically typed type GADT) to
+  -- `Source`. Or maybe a simpler version for primitive types only.
   andC = primOptSort "∧" $ \ case
-           [TrueS ,y]   -> sourceB y
-           [x,TrueS ]   -> sourceB x
-           [x@FalseS,_] -> sourceB x
-           [_,y@FalseS] -> sourceB y
+           [TrueS ,y]            -> sourceB y
+           [x,TrueS ]            -> sourceB x
+           [x@FalseS,_]          -> sourceB x
+           [_,y@FalseS]          -> sourceB y
 #if !defined NoIdempotence
-           [x,Eql(x)]   -> sourceB x
+           [x,x']      | x' == x -> sourceB x
 #endif
-           [x,NotS (Eql(x))] -> newVal False
-           [NotS x,Eql(x)]   -> newVal False
-           _            -> nothingA
+           [x,NotS x'] | x' == x -> newVal False
+           [NotS x,x'] | x' == x -> newVal False
+           _                     -> nothingA
   orC  = primOptSort "∨" $ \ case
-           [FalseS,y]   -> sourceB y
-           [x,FalseS]   -> sourceB x
-           [x@TrueS ,_] -> sourceB x
-           [_,y@TrueS ] -> sourceB y
+           [FalseS,y]            -> sourceB y
+           [x,FalseS]            -> sourceB x
+           [x@TrueS ,_]          -> sourceB x
+           [_,y@TrueS ]          -> sourceB y
 #if !defined NoIdempotence
-           [x,Eql(x)]   -> sourceB x
+           [x,x']      | x' == x -> sourceB x
 #endif
-           [x,NotS (Eql(x))] -> newVal True
-           [NotS x,Eql(x)]   -> newVal True
-           -- not a || not b == not (a && b)
+           [x,NotS x'] | x' == x -> newVal True
+           [NotS x,x'] | x' == x -> newVal True
+           -- not a    || not b == not (a && b)
            -- TODO: Handle more elegantly.
-           [NotS x, NotS y] -> do o <- unmkCK andC (PairB (BoolB x) (BoolB y))
-                                  newComp notC o
-           _            -> nothingA
+           [NotS x, NotS y]      ->
+             do o <- unmkCK andC (PairB (BoolB x) (BoolB y))
+                newComp notC o
+           _                     -> nothingA
   xorC = primOptSort "⊕" $ \ case
-           [FalseS,y]        -> sourceB y
-           [x,FalseS]        -> sourceB x
-           [TrueS,y ]        -> newComp1 notC y
-           [x,TrueS ]        -> newComp1 notC x
-           [x,Eql(x)]        -> newVal False
-           [x,NotS (Eql(x))] -> newVal True
-           [NotS x,Eql(x)]   -> newVal True
+           [FalseS,y]            -> sourceB y
+           [x,FalseS]            -> sourceB x
+           [TrueS,y ]            -> newComp1 notC y
+           [x,TrueS ]            -> newComp1 notC x
+           [x,x']      | x' == x -> newVal False
+           [x,NotS x'] | x' == x -> newVal True
+           [NotS x,x'] | x' == x -> newVal True
 #if 1
            -- not x `xor` y == not (x `xor` y)
-           [NotS x, y]       -> newComp2 (notC . xorC) x y
-           [x, NotS y]       -> newComp2 (notC . xorC) x y
+           [NotS x, y]                -> newComp2 (notC . xorC) x y
+           [x, NotS y]                -> newComp2 (notC . xorC) x y
            -- x `xor` (x `xor` y) == y
-           [x, Eql(x) `XorS` y] -> sourceB y
-           [x, y `XorS` Eql(x)] -> sourceB y
-           [x `XorS` y, Eql(x)] -> sourceB y
-           [y `XorS` x, Eql(x)] -> sourceB y
+           [x, x' `XorS` y] | x' == x -> sourceB y
+           [x, y `XorS` x'] | x' == x -> sourceB y
+           [x `XorS` y, x'] | x' == x -> sourceB y
+           [y `XorS` x, x'] | x' == x -> sourceB y
 #endif
-           _                 -> nothingA
+           _                          -> nothingA
 
 #define BoolToInt "Bool→Int"
 
@@ -907,23 +984,97 @@ boolToIntC = namedC BoolToInt
 -- TODO: After I have more experience with these graph optimizations, reconsider
 -- the interface.
 
-noOpt :: Opt b
-noOpt = const nothingA
+#if 1
 
--- TODO: optimizations.
-eqOpt, neOpt :: Opt Bool
-eqOpt = noOpt
-neOpt = noOpt
+-- noOpt :: Opt b
+-- noOpt = const nothingA
+
+eqOpt, neOpt :: forall a. (Read a, Eq a) => Opt Bool
+eqOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x == y)
+  [a,b] | a == b -> newVal True
+  _              -> nothingA
+neOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x /= y)
+  [a,b] | a == b -> newVal False
+  _              -> nothingA
 
 #define EqPrim(ty) \
  instance EqCat (:>) (ty) where { \
-    equal    = primOpt "≡" eqOpt ;\
-    notEqual = primOpt "≠" neOpt  \
+    equal    = primOptSort "≡" (eqOpt @(ty)) ;\
+    notEqual = primOptSort "≠" (neOpt @(ty))  \
   }
 
-EqPrim(Bool)
+iffC :: EqCat k Bool => (Bool :* Bool) `k` Bool
+iffC = equal
+
+eqOptB, neOptB :: Opt Bool
+-- eqOptB = noOpt
+-- neOptB = noOpt
+
+eqOptB = \ case
+  [TrueS,y]                           -> sourceB y
+  [x,TrueS]                           -> sourceB x
+  [FalseS,y ]                         -> newComp1 notC y
+  [x,FalseS ]                         -> newComp1 notC x
+  [x,NotS x']      | x' == x          -> newVal False
+  [NotS x,x']      | x' == x          -> newVal False
+  -- not x == y == not (x == y)
+  [NotS x, y]                         -> newComp2 (notC . iffC) x y
+  [x, NotS y]                         -> newComp2 (notC . iffC) x y
+  -- x == (x /= y) == not y
+  [x, x' `XorS` y] | x' == x          -> newComp1 notC y
+  [x, y `XorS` x'] | x' == x          -> newComp1 notC y
+  [x `XorS` y, x'] | x' == x          -> newComp1 notC y
+  [y `XorS` x, x'] | x' == x          -> newComp1 notC y
+  -- x == (x == y) == y
+  [x, x' `EqS` y]  | x' == x          -> sourceB y
+  [x, y `EqS` x']  | x' == x          -> sourceB y
+  [x `EqS` y, z]   | z == x || z == y -> sourceB y
+  _                                   -> nothingA
+
+--   [x `EqS` y, Eql(x)]  -> sourceB y
+--   [y `EqS` x, Eql(x)]  -> sourceB y
+-- 
+--     Pattern match checker exceeded (2000000) iterations in
+--     a case alternative.
+
+neOptB = \ case
+  [FalseS,y]                          -> sourceB y
+  [x,FalseS]                          -> sourceB x
+  [TrueS,y ]                          -> newComp1 notC y
+  [x,TrueS ]                          -> newComp1 notC x
+  [x,x']           | x' == x          -> newVal False
+  [x,NotS x']      | x' == x          -> newVal True
+  [NotS x,x']      | x' == x          -> newVal True
+  -- not x `xor` y == not (x `xor` y)
+  [NotS x, y]                         -> newComp2 (notC . xorC) x y
+  [x, NotS y]                         -> newComp2 (notC . xorC) x y
+  -- x `xor` (x `xor` y) == y
+  [x, x' `XorS` y] | x' == x          -> sourceB y
+  [x, y `XorS` x'] | x' == x          -> sourceB y
+  [x `XorS` y, x'] | x' == x          -> sourceB y
+  [y `XorS` x, x'] | x' == x          -> sourceB y
+  -- x `xor` (x == y) == not y
+  [x, x' `EqS` y]  | x' == x          -> newComp1 notC y
+  [x, y `EqS` x']  | x' == x          -> newComp1 notC y
+  [x `EqS` y, z]   | z == x || z == y -> newComp1 notC y
+  _                                   -> nothingA
+
+--   [x `EqS` y, Eql(x)]  -> newComp1 notC y
+--   [y `EqS` x, Eql(x)]  -> newComp1 notC y
+-- 
+--     Pattern match checker exceeded (2000000) iterations in
+--     a case alternative.
+
+-- EqPrim(Bool)
 EqPrim(Int)
+EqPrim(Float)
 EqPrim(Double)
+
+instance EqCat (:>) Bool where
+  equal    = primOptSort "≡" (eqOpt @Bool `orOpt` eqOptB)
+  notEqual = primOptSort "⊕" (neOpt @Bool `orOpt` neOptB)
 
 instance EqCat (:>) () where
   equal = constC True
@@ -931,14 +1082,29 @@ instance EqCat (:>) () where
 instance (EqCat (:>) a, EqCat (:>) b) => EqCat (:>) (a,b) where
   equal = andC . (equal *** equal) . transposeP
 
--- TODO: Move to a general definition in Circat.Classes, and reference here.
-
 -- TODO: optimizations.
-ltOpt, gtOpt, leOpt, geOpt :: Opt Bool
-ltOpt = noOpt
-gtOpt = noOpt
-leOpt = noOpt
-geOpt = noOpt
+ltOpt, gtOpt, leOpt, geOpt :: forall a. (Read a, Ord a) => Opt Bool
+-- ltOpt = noOpt
+-- gtOpt = noOpt
+-- leOpt = noOpt
+-- geOpt = noOpt
+
+ltOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x < y)
+  [a,b] | a == b        -> newVal False
+  _                     -> nothingA
+gtOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x > y)
+  [a,b] | a == b        -> newVal False
+  _                     -> nothingA
+leOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x <= y)
+  [a,b] | a == b        -> newVal True
+  _                     -> nothingA
+geOpt = \ case
+  [Val (x :: a), Val y] -> newVal (x >= y)
+  [a,b] | a == b        -> newVal True
+  _                     -> nothingA
 
 -- ltOpt = \ case
 --   [Val x, Val y] -> newVal (x < y)
@@ -949,14 +1115,15 @@ geOpt = noOpt
 
 #define OrdPrim(ty) \
  instance OrdCat (:>) (ty) where { \
-   lessThan           = primOpt "<" ltOpt ; \
-   greaterThan        = primOpt ">" gtOpt ; \
-   lessThanOrEqual    = primOpt "≤" leOpt ; \
-   greaterThanOrEqual = primOpt "≥" geOpt ; \
+   lessThan           = primOpt "<" (ltOpt @(ty)) ; \
+   greaterThan        = primOpt ">" (gtOpt @(ty)) ; \
+   lessThanOrEqual    = primOpt "≤" (leOpt @(ty)) ; \
+   greaterThanOrEqual = primOpt "≥" (geOpt @(ty)) ; \
  }
 
 OrdPrim(Bool)
 OrdPrim(Int)
+OrdPrim(Float)
 OrdPrim(Double)
 
 instance OrdCat (:>) () where
@@ -969,14 +1136,50 @@ instance OrdCat (:>) () where
 
 -- TODO: Move to a general definition in Circat.Classes, and reference here.
 
+#else
+
+instance (Read a, Eq a) => EqCat (:>) a where
+    equal    = primOptSort "≡" $ \ case
+                 [Val (x :: a), Val y] -> newVal (x == y)
+                 [a,b] | a == b -> newVal True
+                 _              -> nothingA
+    notEqual = primOptSort "≠" $ \ case
+                 [Val (x :: a), Val y] -> newVal (x /= y)
+                 [a,b] | a == b -> newVal False
+                 _              -> nothingA
+
+instance (Read a, Ord a) => OrdCat (:>) a where
+   lessThan           = primOpt "<" $ \ case
+                          [Val (x :: a), Val y] -> newVal (x < y)
+                          [a,b] | a == b        -> newVal False
+                          _                     -> nothingA
+   greaterThan        = primOpt ">" $ \ case
+                          [Val (x :: a), Val y] -> newVal (x > y)
+                          [a,b] | a == b        -> newVal False
+                          _                     -> nothingA
+   lessThanOrEqual    = primOpt "≤" $ \ case
+                          [Val (x :: a), Val y] -> newVal (x <= y)
+                          [a,b] | a == b        -> newVal True
+                          _                     -> nothingA
+   greaterThanOrEqual = primOpt "≥" $ \ case
+                          [Val (x :: a), Val y] -> newVal (x >= y)
+                          [a,b] | a == b        -> newVal True
+                          _                     -> nothingA
+
+
+#endif
+
+-- TODO: Move to a general definition in Circat.Classes, and reference here.
+
 -- instance NumCat (:>) Int  where { add = namedC "+" ; mul = namedC "×" }
 
 -- More robust (works for Double as well):
 
 #define ValT(x,ty) (Val (x :: ty))
 
-#define ZeroT(ty) ValT(0,ty)
-#define  OneT(ty) ValT(1,ty)
+#define   ZeroT(ty) ValT( 0,ty)
+#define    OneT(ty) ValT( 1,ty)
+#define NegOneT(ty) ValT(-1,ty)
 
 pattern NegateS :: Source -> Source
 pattern NegateS a <- Source _ "negate" [a] 0
@@ -984,7 +1187,7 @@ pattern NegateS a <- Source _ "negate" [a] 0
 pattern RecipS  :: Source -> Source
 pattern RecipS  a <- Source _ "recip"  [a] 0
 
-instance (Num a, Read a, Show a, Eq a, GenBuses a, SourceToBuses a)
+instance (Num a, Read a, GST a, Eq a, SourceToBuses a)
       => NumCat (:>) a where
   negateC = primOpt "negate" $ \ case
               [Val x]        -> newVal (negate x)
@@ -1006,10 +1209,12 @@ instance (Num a, Read a, Show a, Eq a, GenBuses a, SourceToBuses a)
               _              -> nothingA
   mulC    = primOptSort "×" $ \ case
               [Val x, Val y] -> newVal (x*y)
-              [OneT(a) ,y]   -> sourceB y
-              [x,OneT(a) ]   -> sourceB x
+              [OneT(a),y]    -> sourceB y
+              [x,OneT(a)]    -> sourceB x
               [x@ZeroT(a),_] -> sourceB x
               [_,y@ZeroT(a)] -> sourceB y
+              [NegOneT(a) ,y] -> newComp1 negateC y
+              [x,NegOneT(a) ] -> newComp1 negateC x
               _              -> nothingA
   powIC   = primOpt     "↑" $ \ case
               [Val x, Val y] -> newVal (x ^ (y :: Int))
@@ -1019,7 +1224,7 @@ instance (Num a, Read a, Show a, Eq a, GenBuses a, SourceToBuses a)
               [_,  ZeroT(a)] -> newVal 1
               _              -> nothingA
 
-instance (Fractional a, Read a, Show a, Eq a, GenBuses a, SourceToBuses a)
+instance (Fractional a, Read a, Eq a, GST a, SourceToBuses a)
       => FractionalCat (:>) a where
   recipC  = primOpt "recip" $ \ case
               [Val x]        -> newVal (recip x)
@@ -1032,13 +1237,14 @@ instance (Fractional a, Read a, Show a, Eq a, GenBuses a, SourceToBuses a)
               [x,NegateS y]  -> newComp2 (negateC . divideC) x y
               _              -> nothingA
 
-instance (Floating a, Read a, Show a, GenBuses a)
-      => FloatingCat (:>) a where
+instance (Floating a, Read a, GST a) => FloatingCat (:>) a where
   expC = primNoOpt1 "exp" exp
   cosC = primNoOpt1 "cos" cos
   sinC = primNoOpt1 "sin" sin
 
-instance (Integral a, Num b, Read a, GenBuses b, Show b)
+-- TODO: optimizations, e.g., sin & cos of negative angles.
+
+instance (Integral a, Num b, Read a, GST b)
       => FromIntegralCat (:>) a b where
   fromIntegralC = primNoOpt1 "fromIntegral" fromIntegral
 
@@ -1287,11 +1493,12 @@ writeDot attrs (name,depths,report) =
 
 displayDot :: (String,String) -> String -> IO ()
 displayDot (outType,res) name = 
-  do systemSuccess $
-       printf "dot %s -T%s %s -o %s" res outType dotFile picFile
-     printf "Wrote %s\n" picFile
+  do putStrLn dotCommand
+     systemSuccess dotCommand
+     -- printf "Wrote %s\n" picFile
      systemSuccess $ printf "%s %s" open picFile
  where
+   dotCommand = printf "dot %s -T%s %s -o %s" res outType dotFile picFile
    dotFile = outFile name "dot"
    picFile = outFile name outType
    open = case SI.os of
@@ -1407,9 +1614,9 @@ trimDGraph g = S.elems $ execState (mapM_ searchComp outComps) S.empty
    sComp = sourceComp g
    searchComp :: CompS -> Trimmer
    searchComp c =
-    do seen <- Mtl.gets (S.member c)
+    do seen <- M.gets (S.member c)
        unless seen $
-         do Mtl.modify (S.insert c)
+         do M.modify (S.insert c)
             mapM_ (searchComp . sComp) (compIns c)
    isOut = isJust . stripPrefix "Out"
 
@@ -1432,7 +1639,8 @@ graphDot name attrs depths =
   printf "digraph %s {\n%s}\n" (tweak <$> name)
          (concatMap wrap (prelude ++ recordDots depths))
  where
-   prelude = [ "rankdir=LR"
+   prelude = [ "margin=0"
+             , "rankdir=LR"
              , "node [shape=Mrecord]"
              , "bgcolor=transparent"
              , "nslimit=20"  -- helps with very large rank graphs
@@ -1500,9 +1708,14 @@ recordDots depths = nodes ++ edges
     where
       node :: CompS -> String
       node (CompS nc prim ins outs _) =
-        printf "%s%s [label=\"{%s%s%s}\"]" prefix (compLab nc) 
-          (ports "" (labs In ins) "|") (escape prim) (ports "|" (labs Out outs) "")
+        printf "%s%s [label=\"{%s%s%s}\"%s]" prefix (compLab nc) 
+          (ports "" (labs In ins) "|")
+          (escape prim)
+          (ports "|" (labs Out outs) "")
+          extras
        where
+         extras | prim == unknownName = ",fontcolor=red,color=red,style=bold"
+                | otherwise = ""
          prefix =
            if hideNoPorts && null ins && null outs then "// " else ""
          ports _ "" _ = ""
@@ -1556,8 +1769,12 @@ recordDots depths = nodes ++ edges
 #else
             constraint = []
 #endif
+#ifdef NoBusSize
+            label _ = []
+#else
             label 1 = []
             label w = [printf "label=%d,fontsize=10" w]
+#endif
    port :: Dir -> (CompNum,PortNum) -> String
    port dir (cnum,np) =
      printf "%s:%s" (compLab cnum) (portLab dir np)
@@ -1900,7 +2117,7 @@ extractBoth :: IsSourceP2 a b => a :+ b :> a :* b
 extractBoth = pureC ((pinsSource &&& pinsSource) . sumBuses)
 
 pinsSource :: IsSource a => Seq PinId -> a
-pinsSource pins = Mtl.evalState genSource (toList pins)
+pinsSource pins = M.evalState genSource (toList pins)
 
 pureC :: (Buses a -> Buses b) -> (a :> b)
 pureC = C . arr
@@ -2257,5 +2474,10 @@ AbsTy(G.M1 i c f p)
 AbsTy((G.:+:) f g p)
 AbsTy((G.:*:) f g p)
 AbsTy((G.:.:) f g p)
+
+AbsTy(M.Identity a)
+AbsTy(M.ReaderT e m a)
+AbsTy(M.WriterT w m a)
+AbsTy(M.StateT s m a)
 
 #endif
